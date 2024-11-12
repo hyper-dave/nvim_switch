@@ -1,0 +1,264 @@
+#!/bin/bash
+
+# Script version
+VERSION="1.0"
+
+# Default directories
+configs_dir="${NVIM_SWITCH_CONFIGS_DIR:-.}"  # Use environment variable if set, otherwise default to current directory
+if [ -z "$XDG_DATA_HOME" ]; then
+  backups_dir="${NVIM_SWITCH_BACKUPS_DIR:-$HOME/.local/share/nvim_switch}"  # Use environment variable if set, otherwise default to $HOME/.local/share/nvim_switch
+else
+  backups_dir="${NVIM_SWITCH_BACKUPS_DIR:-$XDG_DATA_HOME/nvim_switch}"  # Use environment variable if set, otherwise default to XDG data dir / nvim_switch
+fi
+
+# Function to display usage information
+usage() {
+  echo "Usage: $0 [OPTIONS] [COMMAND] [CONFIG_NAME]"
+  echo ""
+  echo "Options:"
+  echo "  -c, --configs-dir <DIR>    Directory for Neovim configurations (default: $configs_dir)"
+  echo "  -b, --backups-dir <DIR>    Directory for Neovim backups (default: $backups_dir)"
+  echo "  -f, --force-clean          Force clean current config before copying new config"
+  echo "  -v, --version              Display script version"
+  echo "  -h, --help                 Display this help message"
+  echo ""
+  echo "Commands:"
+  echo "  backup [CONFIG_NAME]       Back up the current Neovim configuration (optional CONFIG_NAME for subdirectory)"
+  echo "  config [-r] [CONFIG_NAME]  Copy a new configuration."
+  echo "                             -r: Restore from backups (select from backups if CONFIG_NAME is not provided)"
+  echo "  clean                      Remove the current Neovim configuration"
+  echo "  clean-backups              Remove all backups"
+  echo ""
+}
+
+# Function to display version information
+version() {
+  echo "nvim_switch v$VERSION"
+}
+
+# Function to get Neovim configuration directories
+get_nvim_config_dirs() {
+  echo "Getting Neovim configuration directory..."
+  config_dir=$(nvim --headless -c 'set cmdheight=1' -c 'echo stdpath("config")' -c 'q' 2>&1 | tail -n 1 | tr -d '\r\n')
+  echo "Getting Neovim data directory..."
+  data_dir=$(nvim --headless -c 'set cmdheight=1' -c 'echo stdpath("data")' -c 'q' 2>&1 | tail -n 1 | tr -d '\r\n')
+  echo "Getting Neovim cache directory..."
+  cache_dir=$(nvim --headless -c 'set cmdheight=1' -c 'echo stdpath("cache")' -c 'q' 2>&1 | tail -n 1 | tr -d '\r\n')
+}
+
+# Function to display Neovim configuration directories
+display_nvim_config_dirs() {
+  echo "----------------------------------------"
+  echo "Neovim configuration directories:"
+  echo "Configuration directory: $config_dir"
+  echo "Data directory: $data_dir"
+  echo "Cache directory: $cache_dir"
+  echo "----------------------------------------"
+}
+
+# Function to copy Neovim files
+copy_nvim_files() {
+  local config_name="$1"  # Get optional config name
+
+  # Get the current date and time in YYYY-MM-DD_HH-MM-SS format
+  datetime=$(date +%Y-%m-%d_%H-%M-%S)
+  
+  # Get Neovim configuration directories
+  get_nvim_config_dirs
+  
+  # Display the directories and prompt for confirmation
+  display_nvim_config_dirs
+  read -p "Proceed with backup? (y/n) " confirm
+
+  if [[ "$confirm" == "y" ]]; then
+    # Set the backup directory name, including optional config name
+    if [ -n "$config_name" ]; then
+      backup_dir="$backups_dir/$config_name/nvim_backup_$datetime"
+    else
+      backup_dir="$backups_dir/nvim_backup_$datetime"
+    fi
+
+    mkdir -p "$backup_dir"  # Create the backup directory (including any subdirectories)
+
+    # Create metadata file
+    echo "config_dir=\"$config_dir\"" > "$backup_dir/metadata.txt"
+    echo "data_dir=\"$data_dir\"" >> "$backup_dir/metadata.txt"
+    echo "cache_dir=\"$cache_dir\"" >> "$backup_dir/metadata.txt"
+
+    # Copy the directories
+    echo "Copying configuration directory to $backup_dir/config/ ..."
+    cp -r "$config_dir" "$backup_dir/config/"
+    echo "Copying data directory to $backup_dir/share/ ..."
+    cp -r "$data_dir" "$backup_dir/share/"
+    echo "Copying cache directory to $backup_dir/cache/ ..."
+    cp -r "$cache_dir" "$backup_dir/cache/"
+
+    echo "Neovim files copied to $backup_dir/"
+  else
+    echo "Backup cancelled."
+  fi
+}
+
+# Function to copy a new configuration
+copy_new_config() {
+  local restore_from_backup=false
+  local config_name=""
+
+  # Check for -r option
+  if [[ "$1" == "-r" ]]; then
+    restore_from_backup=true
+    shift
+  fi
+
+  if $restore_from_backup; then
+    echo "Restoring configuration from backups..."
+
+    if [ -z "$1" ]; then
+      # If no config name is provided, display selection menu
+      echo "Available backups:"
+      select config_name in $(find "$backups_dir" -mindepth 1 -maxdepth 1 -type d -printf "%P\n"); do
+        if [ -n "$config_name" ]; then
+          break
+        else
+          echo "Invalid selection. Please try again."
+        fi
+      done
+    else
+      config_name="$1"
+    fi
+
+    # Find the latest backup for the given config name
+    latest_backup=$(find "$backups_dir/$config_name" -mindepth 1 -maxdepth 1 -type d -printf "%T@ %P\n" | sort -n | tail -1 | awk '{print $2}')
+
+    # Check if a backup was found
+    if [ -z "$latest_backup" ]; then
+      echo "Error: No backups found for '$config_name'."
+      exit 1
+    fi
+
+    # Load directory mapping from the backup
+    source "$backups_dir/$config_name/$latest_backup/metadata.txt"
+
+    # Remove the existing configuration
+    echo "Deleting current configuration..."
+    rm -rf "$config_dir"
+
+    # Copy the directories based on the mapping
+    echo "Restoring configuration from '$backups_dir/$config_name/$latest_backup'..."
+    cp -r "$backups_dir/$config_name/$latest_backup/config" "$config_dir"
+    cp -r "$backups_dir/$config_name/$latest_backup/share" "$data_dir"
+    cp -r "$backups_dir/$config_name/$latest_backup/cache" "$cache_dir"
+    echo "Configuration restored."
+  else
+    echo "Setting up new configuration..."
+    config_name="$1"
+
+    # Check if the source configuration directory exists
+    if [ ! -d "$configs_dir/$config_name" ]; then
+      echo "Error: Configuration '$config_name' not found in '$configs_dir'."
+      exit 1
+    fi
+
+    # Remove the existing configuration
+    echo "Deleting current configuration..."
+    rm -rf "$config_dir"
+
+    # Check if a directory mapping file exists
+    if [ -f "$configs_dir/$config_name/metadata.txt" ]; then
+      # Load directory mapping from the file
+      source "$configs_dir/$config_name/metadata.txt"
+
+      # Copy the directories based on the mapping
+      echo "Copying configuration to custom directories..."
+      cp -r "$configs_dir/$config_name/config" "$config_dir"
+      cp -r "$configs_dir/$config_name/share" "$data_dir"
+      cp -r "$configs_dir/$config_name/cache" "$cache_dir"
+      echo "Configuration copied."
+    else
+      # Copy the configuration to the default config directory
+      echo "Copying configuration to default directory..."
+      cp -r "$configs_dir/$config_name" ~/.config/nvim
+      echo "Configuration copied."
+    fi
+  fi
+}
+
+# Function to clean current config (all directories)
+clean_current_config() {
+  # Get Neovim configuration directories
+  get_nvim_config_dirs
+
+  # Display the directories and prompt for confirmation
+  display_nvim_config_dirs
+  read -p "Are you sure you want to remove the current Neovim configuration (all directories)? (y/n) " confirm
+
+  if [[ "$confirm" == "y" ]]; then
+    rm -rf "$config_dir"
+    rm -rf "$data_dir"
+    rm -rf "$cache_dir"
+    echo "Current Neovim configuration (all directories) removed."
+  else
+    echo "Clean cancelled."
+  fi
+}
+
+# Function to clean backups
+clean_backups() {
+  read -p "Are you sure you want to remove all backups in '$backups_dir'? (y/n) " confirm
+  if [[ "$confirm" == "y" ]]; then
+    rm -rf "$backups_dir"
+    echo "All backups removed."
+  else
+    echo "Clean cancelled."
+  fi
+}
+
+# Parse command line options
+force_clean_enabled="false"  # Initialize force_clean flag
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -c|--configs-dir)
+      configs_dir="$2"
+      shift 2
+      ;;
+    -b|--backups-dir)
+      backups_dir="$2"
+      shift 2
+      ;;
+    -f|--force-clean)
+      force_clean_enabled="true"
+      shift
+      ;;
+    -v|--version)
+      version
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# Check the command line argument
+if [ "$1" == "backup" ]; then
+  copy_nvim_files "$2"  # Pass the second argument as the config name
+elif [ "$1" == "config" ]; then
+  # Perform force clean before copying
+  if $force_clean_enabled; then
+    echo "Cleaning current Neovim configuration..."
+    clean_current_config  # Call clean_current_config to clean all directories
+  fi
+  shift
+  copy_new_config "$@"  # Pass all remaining arguments to copy_new_config
+elif [ "$1" == "clean" ]; then
+  clean_current_config
+elif [ "$1" == "clean-backups" ]; then
+  clean_backups
+else
+  usage
+  exit 1
+fi
